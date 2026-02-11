@@ -93,8 +93,7 @@ export async function fetchHistoricalMetrics(
       throw new Error(`Density API error (${res.status}): ${text}`);
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const data: any = await res.json();
+    const data = await res.json();
 
     if (data.results) {
       for (const r of data.results) {
