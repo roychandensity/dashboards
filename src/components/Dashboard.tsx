@@ -38,13 +38,16 @@ function loadStored(): StoredSchedule | null {
   if (typeof window === "undefined") return null;
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
+    console.log("[Dashboard] loadStored: raw =", raw ? `${raw.length} chars` : null);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (parsed?.version === 1 && Array.isArray(parsed.schedule)) {
+      console.log("[Dashboard] loadStored: found", parsed.schedule.length, "classes");
       return parsed as StoredSchedule;
     }
-  } catch {
-    // Ignore corrupt data
+    console.log("[Dashboard] loadStored: version/schema mismatch", parsed?.version);
+  } catch (err) {
+    console.error("[Dashboard] loadStored: parse error", err);
   }
   return null;
 }
@@ -56,18 +59,22 @@ function saveToStorage(
 ) {
   if (typeof window === "undefined") return;
   if (sched && sched.length > 0) {
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        version: 1,
-        schedule: sched,
-        bufferBefore: before,
-        bufferAfter: after,
-        savedAt: new Date().toISOString(),
-      } satisfies StoredSchedule)
-    );
+    const data = JSON.stringify({
+      version: 1,
+      schedule: sched,
+      bufferBefore: before,
+      bufferAfter: after,
+      savedAt: new Date().toISOString(),
+    } satisfies StoredSchedule);
+    try {
+      localStorage.setItem(STORAGE_KEY, data);
+      console.log("[Dashboard] saveToStorage: saved", sched.length, "classes,", data.length, "chars");
+    } catch (err) {
+      console.error("[Dashboard] saveToStorage: FAILED to write", err);
+    }
   } else {
     localStorage.removeItem(STORAGE_KEY);
+    console.log("[Dashboard] saveToStorage: cleared (schedule empty)");
   }
 }
 
@@ -88,6 +95,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
 
   // Load from localStorage on mount (client-side only)
   useEffect(() => {
+    console.log("[Dashboard] mount effect running");
     const stored = loadStored();
     if (stored && stored.schedule.length > 0) {
       const maxId = stored.schedule.reduce(
@@ -98,6 +106,9 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
       setSchedule(stored.schedule);
       setBufferBefore(stored.bufferBefore);
       setBufferAfter(stored.bufferAfter);
+      console.log("[Dashboard] restored schedule from localStorage:", stored.schedule.length, "classes");
+    } else {
+      console.log("[Dashboard] no stored schedule found");
     }
   }, []);
 
