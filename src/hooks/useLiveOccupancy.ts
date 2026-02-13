@@ -4,11 +4,15 @@ import { useEffect, useRef, useState, useCallback } from "react";
 
 interface DoorwayState {
   count: number;
+  entrances: number;
+  exits: number;
   connected: boolean;
 }
 
 interface UseLiveOccupancyResult {
   totalCount: number;
+  totalEntrances: number;
+  totalExits: number;
   allConnected: boolean;
   anyConnected: boolean;
   doorwayStates: Record<string, DoorwayState>;
@@ -45,7 +49,12 @@ export function useLiveOccupancy(
           ws.onopen = () => {
             setDoorwayStates((prev) => ({
               ...prev,
-              [doorwayId]: { count: prev[doorwayId]?.count || 0, connected: true },
+              [doorwayId]: {
+                count: prev[doorwayId]?.count || 0,
+                entrances: prev[doorwayId]?.entrances || 0,
+                exits: prev[doorwayId]?.exits || 0,
+                connected: true,
+              },
             }));
           };
 
@@ -54,13 +63,18 @@ export function useLiveOccupancy(
               const data = JSON.parse(event.data);
               // direction: 1 = entry, -1 = exit
               if (typeof data.direction === "number") {
-                setDoorwayStates((prev) => ({
-                  ...prev,
-                  [doorwayId]: {
-                    ...prev[doorwayId],
-                    count: (prev[doorwayId]?.count || 0) + data.direction,
-                  },
-                }));
+                setDoorwayStates((prev) => {
+                  const cur = prev[doorwayId];
+                  return {
+                    ...prev,
+                    [doorwayId]: {
+                      ...cur,
+                      count: (cur?.count || 0) + data.direction,
+                      entrances: (cur?.entrances || 0) + (data.direction === 1 ? 1 : 0),
+                      exits: (cur?.exits || 0) + (data.direction === -1 ? 1 : 0),
+                    },
+                  };
+                });
               }
             } catch {
               // Ignore non-JSON messages (heartbeats, etc.)
@@ -70,7 +84,12 @@ export function useLiveOccupancy(
           ws.onclose = () => {
             setDoorwayStates((prev) => ({
               ...prev,
-              [doorwayId]: { count: prev[doorwayId]?.count || 0, connected: false },
+              [doorwayId]: {
+                count: prev[doorwayId]?.count || 0,
+                entrances: prev[doorwayId]?.entrances || 0,
+                exits: prev[doorwayId]?.exits || 0,
+                connected: false,
+              },
             }));
             // Reconnect after delay
             reconnectTimers.current[doorwayId] = setTimeout(() => {
@@ -86,7 +105,12 @@ export function useLiveOccupancy(
           console.error(`Failed to connect doorway ${doorwayId}:`, err);
           setDoorwayStates((prev) => ({
             ...prev,
-            [doorwayId]: { count: prev[doorwayId]?.count || 0, connected: false },
+            [doorwayId]: {
+              count: prev[doorwayId]?.count || 0,
+              entrances: prev[doorwayId]?.entrances || 0,
+              exits: prev[doorwayId]?.exits || 0,
+              connected: false,
+            },
           }));
           // Retry
           reconnectTimers.current[doorwayId] = setTimeout(() => {
@@ -103,7 +127,7 @@ export function useLiveOccupancy(
     // Initialize states
     const initial: Record<string, DoorwayState> = {};
     for (const id of doorwayIds) {
-      initial[id] = { count: 0, connected: false };
+      initial[id] = { count: 0, entrances: 0, exits: 0, connected: false };
     }
     setDoorwayStates(initial);
 
@@ -128,10 +152,10 @@ export function useLiveOccupancy(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doorwayKey, connectDoorway]);
 
-  const totalCount = Object.values(doorwayStates).reduce(
-    (sum, s) => sum + s.count,
-    0
-  );
+  const vals = Object.values(doorwayStates);
+  const totalCount = vals.reduce((sum, s) => sum + s.count, 0);
+  const totalEntrances = vals.reduce((sum, s) => sum + s.entrances, 0);
+  const totalExits = vals.reduce((sum, s) => sum + s.exits, 0);
   const allConnected =
     doorwayIds.length > 0 &&
     doorwayIds.every((id) => doorwayStates[id]?.connected);
@@ -139,5 +163,5 @@ export function useLiveOccupancy(
     (id) => doorwayStates[id]?.connected
   );
 
-  return { totalCount, allConnected, anyConnected, doorwayStates };
+  return { totalCount, totalEntrances, totalExits, allConnected, anyConnected, doorwayStates };
 }

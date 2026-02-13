@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
 import {
   LineChart,
   Line,
@@ -13,7 +13,9 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { useHistoricalData } from "@/hooks/useHistoricalData";
-import { fromNZLocal } from "@/lib/nz-time";
+import { useClassStatus, ClassStatus } from "@/hooks/useClassStatus";
+import { useLiveOccupancy } from "@/hooks/useLiveOccupancy";
+import { fromNZLocal, addMinutesNZ } from "@/lib/nz-time";
 
 interface ClassRowProps {
   spaceId: string;
@@ -25,22 +27,10 @@ interface ClassRowProps {
   bufferAfterOverride: number | null;
   className?: string;
   instructor?: string;
+  doorwayIds?: string[];
   onTimeChange: (time: string) => void;
   onBufferOverrideChange: (before: number | null, after: number | null) => void;
   onRemove: () => void;
-}
-
-function addMinutes(dateStr: string, timeStr: string, minutes: number): string {
-  const dt = new Date(`${dateStr}T${timeStr}:00`);
-  dt.setMinutes(dt.getMinutes() + minutes);
-  // Clamp to same day boundaries
-  const dayStart = new Date(`${dateStr}T00:00:00`);
-  const dayEnd = new Date(`${dateStr}T23:59:00`);
-  if (dt < dayStart) return `${dateStr}T00:00`;
-  if (dt > dayEnd) return `${dateStr}T23:59`;
-  const hh = String(dt.getHours()).padStart(2, "0");
-  const mm = String(dt.getMinutes()).padStart(2, "0");
-  return `${dateStr}T${hh}:${mm}`;
 }
 
 function formatTimeDisplay(nzLocal: string): string {
@@ -68,6 +58,8 @@ function formatChartTimestamp(ts: string): string {
   });
 }
 
+const EMPTY_DOORWAY_IDS: string[] = [];
+
 export default function ClassRow({
   spaceId,
   date,
@@ -78,6 +70,7 @@ export default function ClassRow({
   bufferAfterOverride,
   className: classLabel,
   instructor,
+  doorwayIds,
   onTimeChange,
   onBufferOverrideChange,
   onRemove,
@@ -98,12 +91,20 @@ export default function ClassRow({
 
   const draftDirty = hasOverride && (draftBefore !== effectiveBefore || draftAfter !== effectiveAfter);
 
+  const status: ClassStatus = useClassStatus(date, time, effectiveBefore, effectiveAfter);
+
+  // Only connect WebSockets when class is live and doorwayIds are provided
+  const liveDoorwayIds = status === "live" && doorwayIds && doorwayIds.length > 0
+    ? doorwayIds
+    : EMPTY_DOORWAY_IDS;
+  const { totalCount, totalEntrances, totalExits, anyConnected } = useLiveOccupancy(liveDoorwayIds);
+
   const { startUTC, endUTC, startDisplay, endDisplay } = useMemo(() => {
     if (!time || !date) {
       return { startUTC: "", endUTC: "", startDisplay: "", endDisplay: "" };
     }
-    const startLocal = addMinutes(date, time, -effectiveBefore);
-    const endLocal = addMinutes(date, time, effectiveAfter);
+    const startLocal = addMinutesNZ(date, time, -effectiveBefore);
+    const endLocal = addMinutesNZ(date, time, effectiveAfter);
     return {
       startUTC: fromNZLocal(startLocal),
       endUTC: fromNZLocal(endLocal),
@@ -112,12 +113,21 @@ export default function ClassRow({
     };
   }, [date, time, effectiveBefore, effectiveAfter]);
 
-  const { data, loading, error } = useHistoricalData(
+  const { data, loading, error, refetch } = useHistoricalData(
     spaceId,
     startUTC,
     endUTC,
     "1m"
   );
+
+  // Refetch historical data when transitioning from live to completed
+  const prevStatusRef = useRef<ClassStatus>(status);
+  useEffect(() => {
+    if (prevStatusRef.current === "live" && status === "completed") {
+      refetch();
+    }
+    prevStatusRef.current = status;
+  }, [status, refetch]);
 
   const stats = useMemo(() => {
     let entrances = 0;
@@ -159,6 +169,21 @@ export default function ClassRow({
     onBufferOverrideChange(draftBefore, draftAfter);
   };
 
+  // Determine which stats to display based on status
+  const isLive = status === "live";
+  const isUpcoming = status === "upcoming";
+  const displayStats = isLive
+    ? [
+        { label: "Entrances", value: totalEntrances, color: "text-green-600" },
+        { label: "Exits", value: totalExits, color: "text-amber-600" },
+        { label: "Net Occupancy", value: totalCount, color: "text-blue-600" },
+      ]
+    : [
+        { label: "Entrances", value: stats.entrances, color: "text-green-600" },
+        { label: "Exits", value: stats.exits, color: "text-amber-600" },
+        { label: "Net Occupancy", value: stats.net, color: "text-blue-600" },
+      ];
+
   return (
     <div className="bg-white rounded-xl shadow-md p-4">
       <div className="flex items-center gap-4 mb-3">
@@ -181,6 +206,23 @@ export default function ClassRow({
         {(classLabel || instructor) && (
           <span className="text-sm text-gray-400">
             {[classLabel, instructor].filter(Boolean).join(" — ")}
+          </span>
+        )}
+
+        {isUpcoming && (
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+            Upcoming
+          </span>
+        )}
+
+        {isLive && (
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-green-600 bg-green-50 px-2 py-0.5 rounded-full">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+            Live tracking
+            {anyConnected && (
+              <span className="text-green-400 text-[10px]">WS</span>
+            )}
           </span>
         )}
 
@@ -250,11 +292,7 @@ export default function ClassRow({
       )}
 
       <div className="grid grid-cols-3 gap-4">
-        {[
-          { label: "Entrances", value: stats.entrances, color: "text-green-600" },
-          { label: "Exits", value: stats.exits, color: "text-amber-600" },
-          { label: "Net Occupancy", value: stats.net, color: "text-blue-600" },
-        ].map((card) => (
+        {displayStats.map((card) => (
           <div
             key={card.label}
             className="bg-gray-50 rounded-lg p-3 text-center"
@@ -262,8 +300,12 @@ export default function ClassRow({
             <p className="text-xs font-medium text-gray-500 mb-1">
               {card.label}
             </p>
-            {!hasTime ? (
+            {!hasTime || isUpcoming ? (
               <p className="text-2xl font-bold text-gray-300">&mdash;</p>
+            ) : isLive ? (
+              <p className={`text-2xl font-bold ${card.color}`}>
+                {card.value}
+              </p>
             ) : loading ? (
               <p className="text-2xl font-bold text-gray-300 animate-pulse">
                 --
@@ -279,9 +321,13 @@ export default function ClassRow({
         ))}
       </div>
 
-      {hasTime && (
+      {hasTime && !isUpcoming && (
         <div className="mt-4 h-[200px]">
-          {loading ? (
+          {isLive ? (
+            <div className="flex items-center justify-center h-full">
+              <p className="text-sm text-gray-400">Chart will show after class ends</p>
+            </div>
+          ) : loading ? (
             <div className="flex items-center justify-center h-full">
               <p className="text-sm text-gray-400 animate-pulse">Loading chart...</p>
             </div>

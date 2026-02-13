@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import SpaceList from "@/components/SpaceList";
 import ClassRow from "@/components/ClassRow";
@@ -24,6 +24,53 @@ interface DashboardProps {
   doorwayHealth: Record<string, string>;
 }
 
+const STORAGE_KEY = "dashboard-schedule";
+
+interface StoredSchedule {
+  version: 1;
+  schedule: ScheduleClass[];
+  bufferBefore: number;
+  bufferAfter: number;
+  savedAt: string;
+}
+
+function loadStored(): StoredSchedule | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed?.version === 1 && Array.isArray(parsed.schedule)) {
+      return parsed as StoredSchedule;
+    }
+  } catch {
+    // Ignore corrupt data
+  }
+  return null;
+}
+
+function saveToStorage(
+  sched: ScheduleClass[] | null,
+  before: number,
+  after: number
+) {
+  if (typeof window === "undefined") return;
+  if (sched && sched.length > 0) {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        schedule: sched,
+        bufferBefore: before,
+        bufferAfter: after,
+        savedAt: new Date().toISOString(),
+      } satisfies StoredSchedule)
+    );
+  } else {
+    localStorage.removeItem(STORAGE_KEY);
+  }
+}
+
 let nextId = 1;
 
 export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
@@ -32,6 +79,36 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
   const [bufferAfter, setBufferAfter] = useState(5);
   const [uploadErrors, setUploadErrors] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Refs so handlers always read the latest values without stale closures
+  const bufferBeforeRef = useRef(bufferBefore);
+  bufferBeforeRef.current = bufferBefore;
+  const bufferAfterRef = useRef(bufferAfter);
+  bufferAfterRef.current = bufferAfter;
+
+  // Load from localStorage on mount (client-side only)
+  useEffect(() => {
+    const stored = loadStored();
+    if (stored && stored.schedule.length > 0) {
+      const maxId = stored.schedule.reduce(
+        (max, c) => Math.max(max, parseInt(c.id) || 0),
+        0
+      );
+      nextId = maxId + 1;
+      setSchedule(stored.schedule);
+      setBufferBefore(stored.bufferBefore);
+      setBufferAfter(stored.bufferAfter);
+    }
+  }, []);
+
+  // Precompute doorwayIds by spaceId
+  const doorwayIdsBySpace = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const s of spaces) {
+      map.set(s.id, s.doorways.map((d) => d.id));
+    }
+    return map;
+  }, [spaces]);
 
   const handleFileUpload = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -71,8 +148,10 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
           });
         }
 
-        setSchedule(newSchedule.length > 0 ? newSchedule : null);
+        const result = newSchedule.length > 0 ? newSchedule : null;
+        setSchedule(result);
         setUploadErrors(newErrors);
+        saveToStorage(result, bufferBeforeRef.current, bufferAfterRef.current);
       };
       reader.readAsText(file);
 
@@ -89,6 +168,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
   const handleClear = useCallback(() => {
     setSchedule(null);
     setUploadErrors([]);
+    localStorage.removeItem(STORAGE_KEY);
   }, []);
 
   const handleDownloadTemplate = useCallback(() => {
@@ -112,22 +192,26 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
   }, [spaces]);
 
   const updateClassTime = useCallback((id: string, time: string) => {
-    setSchedule((prev) =>
-      prev ? prev.map((c) => (c.id === id ? { ...c, time } : c)) : prev
-    );
+    setSchedule((prev) => {
+      if (!prev) return prev;
+      const next = prev.map((c) => (c.id === id ? { ...c, time } : c));
+      saveToStorage(next, bufferBeforeRef.current, bufferAfterRef.current);
+      return next;
+    });
   }, []);
 
   const updateClassBuffers = useCallback(
     (id: string, before: number | null, after: number | null) => {
-      setSchedule((prev) =>
-        prev
-          ? prev.map((c) =>
-              c.id === id
-                ? { ...c, bufferBeforeOverride: before, bufferAfterOverride: after }
-                : c
-            )
-          : prev
-      );
+      setSchedule((prev) => {
+        if (!prev) return prev;
+        const next = prev.map((c) =>
+          c.id === id
+            ? { ...c, bufferBeforeOverride: before, bufferAfterOverride: after }
+            : c
+        );
+        saveToStorage(next, bufferBeforeRef.current, bufferAfterRef.current);
+        return next;
+      });
     },
     []
   );
@@ -136,9 +220,45 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
     setSchedule((prev) => {
       if (!prev) return prev;
       const next = prev.filter((c) => c.id !== id);
-      return next.length === 0 ? null : next;
+      if (next.length === 0) {
+        localStorage.removeItem(STORAGE_KEY);
+        return null;
+      }
+      saveToStorage(next, bufferBeforeRef.current, bufferAfterRef.current);
+      return next;
     });
   }, []);
+
+  const handleBufferBeforeChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const val = Math.max(0, parseInt(e.target.value) || 0);
+      setBufferBefore(val);
+      bufferBeforeRef.current = val;
+      // Re-save with the updated buffer — read schedule from ref-less source
+      setSchedule((prev) => {
+        if (prev && prev.length > 0) {
+          saveToStorage(prev, val, bufferAfterRef.current);
+        }
+        return prev; // no state change, just piggyback to read current schedule
+      });
+    },
+    []
+  );
+
+  const handleBufferAfterChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const val = Math.max(0, parseInt(e.target.value) || 0);
+      setBufferAfter(val);
+      bufferAfterRef.current = val;
+      setSchedule((prev) => {
+        if (prev && prev.length > 0) {
+          saveToStorage(prev, bufferBeforeRef.current, val);
+        }
+        return prev;
+      });
+    },
+    []
+  );
 
   // Group schedule by spaceId, preserving order
   const groupedSchedule = schedule
@@ -231,9 +351,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
                   min={0}
                   max={60}
                   value={bufferBefore}
-                  onChange={(e) =>
-                    setBufferBefore(Math.max(0, parseInt(e.target.value) || 0))
-                  }
+                  onChange={handleBufferBeforeChange}
                   className="border border-gray-300 rounded-md px-2 py-1 text-sm w-16"
                 />
                 <span className="text-xs text-gray-500">min before</span>
@@ -244,9 +362,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
                   min={0}
                   max={60}
                   value={bufferAfter}
-                  onChange={(e) =>
-                    setBufferAfter(Math.max(0, parseInt(e.target.value) || 0))
-                  }
+                  onChange={handleBufferAfterChange}
                   className="border border-gray-300 rounded-md px-2 py-1 text-sm w-16"
                 />
                 <span className="text-xs text-gray-500">min after</span>
@@ -288,6 +404,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
                     bufferAfterOverride={cls.bufferAfterOverride}
                     className={cls.className}
                     instructor={cls.instructor}
+                    doorwayIds={doorwayIdsBySpace.get(cls.spaceId) ?? []}
                     onTimeChange={(t) => updateClassTime(cls.id, t)}
                     onBufferOverrideChange={(before, after) =>
                       updateClassBuffers(cls.id, before, after)
