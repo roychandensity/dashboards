@@ -4,6 +4,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import SpaceList from "@/components/SpaceList";
 import ClassRow from "@/components/ClassRow";
+import ExportPanel from "@/components/ExportPanel";
 import { DensitySpace } from "@/lib/density-api";
 import { parseScheduleCsv } from "@/lib/parse-schedule-csv";
 import { getTodayNZ } from "@/lib/nz-time";
@@ -78,6 +79,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
   const [bufferBefore, setBufferBefore] = useState(5);
   const [bufferAfter, setBufferAfter] = useState(5);
   const [uploadErrors, setUploadErrors] = useState<string[]>([]);
+  const [showExportPanel, setShowExportPanel] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Refs so handlers always read the latest values without stale closures
@@ -337,6 +339,16 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
               Upload New
             </button>
             <button
+              onClick={() => setShowExportPanel((v) => !v)}
+              className={`text-sm font-medium px-4 py-2 rounded-lg border ${
+                showExportPanel
+                  ? "bg-green-50 text-green-700 border-green-300"
+                  : "text-gray-600 hover:text-gray-800 border-gray-300"
+              }`}
+            >
+              Export All CSV
+            </button>
+            <button
               onClick={handleClear}
               className="text-sm text-gray-600 hover:text-gray-800 border border-gray-300 px-4 py-2 rounded-lg"
             >
@@ -383,6 +395,15 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
             </div>
           )}
 
+          {showExportPanel && schedule && (
+            <ExportPanel
+              spaces={spaces}
+              schedule={schedule}
+              bufferBefore={bufferBefore}
+              bufferAfter={bufferAfter}
+            />
+          )}
+
           {groupedSchedule?.map(({ space, classes: spaceClasses }) => (
             <div key={space.id} className="mb-8">
               <Link
@@ -396,6 +417,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
                   <ClassRow
                     key={cls.id}
                     spaceId={cls.spaceId}
+                    spaceName={space.name}
                     date={cls.date}
                     time={cls.time}
                     globalBufferBefore={bufferBefore}

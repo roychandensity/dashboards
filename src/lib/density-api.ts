@@ -188,6 +188,33 @@ export async function fetchSpaces(): Promise<DensitySpace[]> {
   return spaces;
 }
 
+const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
+
+export async function fetchHistoricalMetrics1m(
+  spaceId: string,
+  startDate: string,
+  endDate: string
+): Promise<MetricsBucket[]> {
+  const startMs = new Date(startDate).getTime();
+  const endMs = new Date(endDate).getTime();
+  const allResults: MetricsBucket[] = [];
+
+  let chunkStart = startMs;
+  while (chunkStart < endMs) {
+    const chunkEnd = Math.min(chunkStart + FOUR_HOURS_MS, endMs);
+    const res = await fetchHistoricalMetrics({
+      spaceId,
+      startDate: new Date(chunkStart).toISOString(),
+      endDate: new Date(chunkEnd).toISOString(),
+      resolution: "1m",
+    });
+    allResults.push(...res.results);
+    chunkStart = chunkEnd;
+  }
+
+  return allResults;
+}
+
 export async function fetchSpace(spaceId: string): Promise<DensitySpace> {
   const res = await fetch(`${API_BASE}/v2/spaces/${spaceId}`, {
     headers: {

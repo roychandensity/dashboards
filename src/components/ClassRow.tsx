@@ -16,9 +16,11 @@ import { useHistoricalData } from "@/hooks/useHistoricalData";
 import { useClassStatus, ClassStatus } from "@/hooks/useClassStatus";
 import { useLiveOccupancy } from "@/hooks/useLiveOccupancy";
 import { fromNZLocal, addMinutesNZ } from "@/lib/nz-time";
+import { generateClassExportCsv, triggerDownload } from "@/lib/csv-export";
 
 interface ClassRowProps {
   spaceId: string;
+  spaceName?: string;
   date: string; // "YYYY-MM-DD"
   time: string; // "HH:MM" or ""
   globalBufferBefore: number; // minutes
@@ -62,6 +64,7 @@ const EMPTY_DOORWAY_IDS: string[] = [];
 
 export default function ClassRow({
   spaceId,
+  spaceName = "",
   date,
   time,
   globalBufferBefore,
@@ -233,12 +236,33 @@ export default function ClassRow({
           Custom buffers
         </button>
 
-        <button
-          onClick={onRemove}
-          className="ml-auto text-sm text-red-500 hover:text-red-700"
-        >
-          Remove
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          {status !== "upcoming" && data.length > 0 && (
+            <button
+              disabled={loading}
+              onClick={() => {
+                const csv = generateClassExportCsv(
+                  data,
+                  spaceName,
+                  classLabel ?? "",
+                  instructor ?? "",
+                  time
+                );
+                const safeName = (classLabel ?? "class").replace(/[^a-zA-Z0-9]/g, "_");
+                triggerDownload(csv, `${safeName}_${date}_${time}.csv`);
+              }}
+              className="text-sm text-blue-600 hover:text-blue-800 disabled:text-gray-300 disabled:cursor-not-allowed"
+            >
+              Export CSV
+            </button>
+          )}
+          <button
+            onClick={onRemove}
+            className="text-sm text-red-500 hover:text-red-700"
+          >
+            Remove
+          </button>
+        </div>
       </div>
 
       {hasOverride && (

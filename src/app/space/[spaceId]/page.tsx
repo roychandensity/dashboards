@@ -226,6 +226,7 @@ export default function SpaceDetailPage({
           <ClassRow
             key={cls.id}
             spaceId={spaceId}
+            spaceName={space.name}
             date={selectedDate}
             time={cls.time}
             globalBufferBefore={bufferBefore}
