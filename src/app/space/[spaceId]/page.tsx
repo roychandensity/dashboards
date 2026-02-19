@@ -3,6 +3,7 @@
 import { use, useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 import ClassRow from "@/components/ClassRow";
+import LiveSensorFeed from "@/components/LiveSensorFeed";
 import { getTodayNZ } from "@/lib/nz-time";
 
 interface SpaceData {
@@ -82,6 +83,8 @@ export default function SpaceDetailPage({
 
   const [bufferBefore, setBufferBefore] = useState(5);
   const [bufferAfter, setBufferAfter] = useState(5);
+  const [countAtOffset, setCountAtOffset] = useState(10);
+  const [showLiveFeed, setShowLiveFeed] = useState(false);
   const [classes, setClasses] = useState<ClassSlot[]>(() => [makeSlot()]);
 
   const addClass = useCallback(() => {
@@ -213,13 +216,52 @@ export default function SpaceDetailPage({
             </div>
           </label>
 
+          <label className="flex flex-col text-sm font-medium text-gray-700">
+            Count at offset
+            <div className="flex items-center gap-1 mt-1">
+              <input
+                type="number"
+                min={0}
+                max={60}
+                value={countAtOffset}
+                onChange={(e) =>
+                  setCountAtOffset(Math.max(0, parseInt(e.target.value) || 0))
+                }
+                className="border border-gray-300 rounded-md px-2 py-1 text-sm w-16"
+              />
+              <span className="text-xs text-gray-500">min</span>
+            </div>
+          </label>
+
           <button
             onClick={addClass}
             className="bg-blue-600 text-white text-sm font-medium px-4 py-1.5 rounded-md hover:bg-blue-700"
           >
             + Add Class
           </button>
+
+          <button
+            onClick={() => setShowLiveFeed((v) => !v)}
+            className={`text-sm font-medium px-4 py-1.5 rounded-md border ${
+              showLiveFeed
+                ? "bg-green-50 text-green-700 border-green-300"
+                : "border-gray-300 text-gray-600 hover:text-gray-800"
+            }`}
+          >
+            {showLiveFeed ? "Hide Live Feed" : "Live Sensor Feed"}
+          </button>
         </div>
+
+        {/* Live sensor verification feed */}
+        {showLiveFeed && space && (
+          <LiveSensorFeed
+            doorwayIds={space.doorways.map((d) => d.id)}
+            doorwayNames={Object.fromEntries(
+              space.doorways.map((d) => [d.id, d.name])
+            )}
+            capacity={space.capacity ?? undefined}
+          />
+        )}
 
         {/* Class rows */}
         {classes.map((cls) => (
@@ -233,6 +275,7 @@ export default function SpaceDetailPage({
             globalBufferAfter={bufferAfter}
             bufferBeforeOverride={cls.bufferBeforeOverride}
             bufferAfterOverride={cls.bufferAfterOverride}
+            countAtOffset={countAtOffset}
             onTimeChange={(t) => updateClassTime(cls.id, t)}
             onBufferOverrideChange={(before, after) =>
               updateClassBuffers(cls.id, before, after)

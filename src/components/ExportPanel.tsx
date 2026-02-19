@@ -3,22 +3,14 @@
 import { useState, useCallback, useMemo } from "react";
 import { DensitySpace } from "@/lib/density-api";
 import { fromNZLocal } from "@/lib/nz-time";
-
-interface ScheduleClass {
-  spaceId: string;
-  date: string;
-  time: string;
-  className: string;
-  instructor: string;
-  bufferBeforeOverride: number | null;
-  bufferAfterOverride: number | null;
-}
+import type { ScheduleClass } from "@/lib/types";
 
 interface ExportPanelProps {
   spaces: DensitySpace[];
   schedule: ScheduleClass[];
   bufferBefore: number;
   bufferAfter: number;
+  countAtOffset?: number;
 }
 
 export default function ExportPanel({
@@ -26,6 +18,7 @@ export default function ExportPanel({
   schedule,
   bufferBefore,
   bufferAfter,
+  countAtOffset = 10,
 }: ExportPanelProps) {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -116,6 +109,7 @@ export default function ExportPanel({
           startDate: startUtc,
           endDate: endUtc,
           classes: classesPayload,
+          countAtOffset,
         }),
       });
 
@@ -136,7 +130,7 @@ export default function ExportPanel({
     } finally {
       setLoading(false);
     }
-  }, [startDate, endDate, schedule, spaceMap, bufferBefore, bufferAfter]);
+  }, [startDate, endDate, schedule, spaceMap, bufferBefore, bufferAfter, countAtOffset]);
 
   return (
     <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-4">

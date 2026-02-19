@@ -3,22 +3,13 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import SpaceList from "@/components/SpaceList";
-import ClassRow from "@/components/ClassRow";
+import ClassGroupWrapper from "@/components/ClassGroupWrapper";
 import ExportPanel from "@/components/ExportPanel";
+import { detectBackToBack } from "@/lib/back-to-back";
 import { DensitySpace } from "@/lib/density-api";
 import { parseScheduleCsv } from "@/lib/parse-schedule-csv";
 import { getTodayNZ } from "@/lib/nz-time";
-
-interface ScheduleClass {
-  id: string;
-  spaceId: string;
-  date: string;
-  time: string;
-  className: string;
-  instructor: string;
-  bufferBeforeOverride: number | null;
-  bufferAfterOverride: number | null;
-}
+import type { ScheduleClass } from "@/lib/types";
 
 interface DashboardProps {
   spaces: DensitySpace[];
@@ -32,6 +23,7 @@ interface StoredSchedule {
   schedule: ScheduleClass[];
   bufferBefore: number;
   bufferAfter: number;
+  countAtOffset: number;
   savedAt: string;
 }
 
@@ -53,7 +45,8 @@ function loadStored(): StoredSchedule | null {
 function saveToStorage(
   sched: ScheduleClass[] | null,
   before: number,
-  after: number
+  after: number,
+  offset: number
 ) {
   if (typeof window === "undefined") return;
   if (sched && sched.length > 0) {
@@ -64,6 +57,7 @@ function saveToStorage(
         schedule: sched,
         bufferBefore: before,
         bufferAfter: after,
+        countAtOffset: offset,
         savedAt: new Date().toISOString(),
       } satisfies StoredSchedule)
     );
@@ -78,6 +72,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
   const [schedule, setSchedule] = useState<ScheduleClass[] | null>(null);
   const [bufferBefore, setBufferBefore] = useState(5);
   const [bufferAfter, setBufferAfter] = useState(5);
+  const [countAtOffset, setCountAtOffset] = useState(10);
   const [uploadErrors, setUploadErrors] = useState<string[]>([]);
   const [showExportPanel, setShowExportPanel] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -87,6 +82,8 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
   bufferBeforeRef.current = bufferBefore;
   const bufferAfterRef = useRef(bufferAfter);
   bufferAfterRef.current = bufferAfter;
+  const countAtOffsetRef = useRef(countAtOffset);
+  countAtOffsetRef.current = countAtOffset;
 
   // Load from localStorage on mount (client-side only)
   useEffect(() => {
@@ -100,6 +97,9 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
       setSchedule(stored.schedule);
       setBufferBefore(stored.bufferBefore);
       setBufferAfter(stored.bufferAfter);
+      if (typeof stored.countAtOffset === "number") {
+        setCountAtOffset(stored.countAtOffset);
+      }
     }
   }, []);
 
@@ -153,7 +153,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
         const result = newSchedule.length > 0 ? newSchedule : null;
         setSchedule(result);
         setUploadErrors(newErrors);
-        saveToStorage(result, bufferBeforeRef.current, bufferAfterRef.current);
+        saveToStorage(result, bufferBeforeRef.current, bufferAfterRef.current, countAtOffsetRef.current);
       };
       reader.readAsText(file);
 
@@ -197,7 +197,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
     setSchedule((prev) => {
       if (!prev) return prev;
       const next = prev.map((c) => (c.id === id ? { ...c, time } : c));
-      saveToStorage(next, bufferBeforeRef.current, bufferAfterRef.current);
+      saveToStorage(next, bufferBeforeRef.current, bufferAfterRef.current, countAtOffsetRef.current);
       return next;
     });
   }, []);
@@ -211,7 +211,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
             ? { ...c, bufferBeforeOverride: before, bufferAfterOverride: after }
             : c
         );
-        saveToStorage(next, bufferBeforeRef.current, bufferAfterRef.current);
+        saveToStorage(next, bufferBeforeRef.current, bufferAfterRef.current, countAtOffsetRef.current);
         return next;
       });
     },
@@ -226,7 +226,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
         localStorage.removeItem(STORAGE_KEY);
         return null;
       }
-      saveToStorage(next, bufferBeforeRef.current, bufferAfterRef.current);
+      saveToStorage(next, bufferBeforeRef.current, bufferAfterRef.current, countAtOffsetRef.current);
       return next;
     });
   }, []);
@@ -239,7 +239,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
       // Re-save with the updated buffer — read schedule from ref-less source
       setSchedule((prev) => {
         if (prev && prev.length > 0) {
-          saveToStorage(prev, val, bufferAfterRef.current);
+          saveToStorage(prev, val, bufferAfterRef.current, countAtOffsetRef.current);
         }
         return prev; // no state change, just piggyback to read current schedule
       });
@@ -254,7 +254,22 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
       bufferAfterRef.current = val;
       setSchedule((prev) => {
         if (prev && prev.length > 0) {
-          saveToStorage(prev, bufferBeforeRef.current, val);
+          saveToStorage(prev, bufferBeforeRef.current, val, countAtOffsetRef.current);
+        }
+        return prev;
+      });
+    },
+    []
+  );
+
+  const handleCountAtOffsetChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const val = Math.max(0, parseInt(e.target.value) || 0);
+      setCountAtOffset(val);
+      countAtOffsetRef.current = val;
+      setSchedule((prev) => {
+        if (prev && prev.length > 0) {
+          saveToStorage(prev, bufferBeforeRef.current, bufferAfterRef.current, val);
         }
         return prev;
       });
@@ -379,6 +394,19 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
                 />
                 <span className="text-xs text-gray-500">min after</span>
               </label>
+              <span className="text-gray-300 mx-1">|</span>
+              <label className="flex items-center gap-1 text-sm text-gray-700">
+                Count at
+                <input
+                  type="number"
+                  min={0}
+                  max={60}
+                  value={countAtOffset}
+                  onChange={handleCountAtOffsetChange}
+                  className="border border-gray-300 rounded-md px-2 py-1 text-sm w-16"
+                />
+                <span className="text-xs text-gray-500">min after start</span>
+              </label>
             </div>
           </div>
 
@@ -401,42 +429,42 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
               schedule={schedule}
               bufferBefore={bufferBefore}
               bufferAfter={bufferAfter}
+              countAtOffset={countAtOffset}
             />
           )}
 
-          {groupedSchedule?.map(({ space, classes: spaceClasses }) => (
-            <div key={space.id} className="mb-8">
-              <Link
-                href={`/space/${space.id}`}
-                className="text-lg font-semibold text-gray-900 hover:text-blue-600 hover:underline mb-3 inline-block"
-              >
-                {space.name}
-              </Link>
-              <div className="space-y-4">
-                {spaceClasses.map((cls) => (
-                  <ClassRow
-                    key={cls.id}
-                    spaceId={cls.spaceId}
-                    spaceName={space.name}
-                    date={cls.date}
-                    time={cls.time}
-                    globalBufferBefore={bufferBefore}
-                    globalBufferAfter={bufferAfter}
-                    bufferBeforeOverride={cls.bufferBeforeOverride}
-                    bufferAfterOverride={cls.bufferAfterOverride}
-                    className={cls.className}
-                    instructor={cls.instructor}
-                    doorwayIds={doorwayIdsBySpace.get(cls.spaceId) ?? []}
-                    onTimeChange={(t) => updateClassTime(cls.id, t)}
-                    onBufferOverrideChange={(before, after) =>
-                      updateClassBuffers(cls.id, before, after)
-                    }
-                    onRemove={() => removeClass(cls.id)}
-                  />
-                ))}
+          {groupedSchedule?.map(({ space, classes: spaceClasses }) => {
+            const groups = detectBackToBack(spaceClasses, bufferBefore, bufferAfter);
+            return (
+              <div key={space.id} className="mb-8">
+                <Link
+                  href={`/space/${space.id}`}
+                  className="text-lg font-semibold text-gray-900 hover:text-blue-600 hover:underline mb-3 inline-block"
+                >
+                  {space.name}
+                </Link>
+                <div className="space-y-4">
+                  {groups.map((group) => (
+                    <ClassGroupWrapper
+                      key={group.classes.map((c) => c.id).join("-")}
+                      group={group}
+                      spaceId={space.id}
+                      spaceName={space.name}
+                      doorwayIds={doorwayIdsBySpace.get(space.id) ?? []}
+                      globalBufferBefore={bufferBefore}
+                      globalBufferAfter={bufferAfter}
+                      countAtOffset={countAtOffset}
+                      onTimeChange={(id, t) => updateClassTime(id, t)}
+                      onBufferOverrideChange={(id, before, after) =>
+                        updateClassBuffers(id, before, after)
+                      }
+                      onRemove={(id) => removeClass(id)}
+                    />
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </>
       )}
     </div>

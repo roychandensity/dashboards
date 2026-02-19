@@ -9,6 +9,12 @@ interface DoorwayState {
   connected: boolean;
 }
 
+export interface LiveEvent {
+  doorwayId: string;
+  direction: 1 | -1;
+  timestamp: Date;
+}
+
 interface UseLiveOccupancyResult {
   totalCount: number;
   totalEntrances: number;
@@ -16,9 +22,12 @@ interface UseLiveOccupancyResult {
   allConnected: boolean;
   anyConnected: boolean;
   doorwayStates: Record<string, DoorwayState>;
+  events: LiveEvent[];
+  resetCounts: () => void;
 }
 
 const RECONNECT_DELAY = 3000;
+const MAX_EVENTS = 200;
 
 export function useLiveOccupancy(
   doorwayIds: string[]
@@ -26,6 +35,7 @@ export function useLiveOccupancy(
   const [doorwayStates, setDoorwayStates] = useState<
     Record<string, DoorwayState>
   >({});
+  const [events, setEvents] = useState<LiveEvent[]>([]);
   const wsRefs = useRef<Record<string, WebSocket>>({});
   const reconnectTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
@@ -63,17 +73,22 @@ export function useLiveOccupancy(
               const data = JSON.parse(event.data);
               // direction: 1 = entry, -1 = exit
               if (typeof data.direction === "number") {
+                const dir = data.direction as 1 | -1;
                 setDoorwayStates((prev) => {
                   const cur = prev[doorwayId];
                   return {
                     ...prev,
                     [doorwayId]: {
                       ...cur,
-                      count: (cur?.count || 0) + data.direction,
-                      entrances: (cur?.entrances || 0) + (data.direction === 1 ? 1 : 0),
-                      exits: (cur?.exits || 0) + (data.direction === -1 ? 1 : 0),
+                      count: (cur?.count || 0) + dir,
+                      entrances: (cur?.entrances || 0) + (dir === 1 ? 1 : 0),
+                      exits: (cur?.exits || 0) + (dir === -1 ? 1 : 0),
                     },
                   };
+                });
+                setEvents((prev) => {
+                  const next = [...prev, { doorwayId, direction: dir, timestamp: new Date() }];
+                  return next.length > MAX_EVENTS ? next.slice(-MAX_EVENTS) : next;
                 });
               }
             } catch {
@@ -130,6 +145,7 @@ export function useLiveOccupancy(
       initial[id] = { count: 0, entrances: 0, exits: 0, connected: false };
     }
     setDoorwayStates(initial);
+    setEvents([]);
 
     // Connect all doorways
     for (const id of doorwayIds) {
@@ -152,6 +168,17 @@ export function useLiveOccupancy(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doorwayKey, connectDoorway]);
 
+  const resetCounts = useCallback(() => {
+    setDoorwayStates((prev) => {
+      const next: Record<string, DoorwayState> = {};
+      for (const [id, state] of Object.entries(prev)) {
+        next[id] = { ...state, count: 0, entrances: 0, exits: 0 };
+      }
+      return next;
+    });
+    setEvents([]);
+  }, []);
+
   const vals = Object.values(doorwayStates);
   const totalCount = vals.reduce((sum, s) => sum + s.count, 0);
   const totalEntrances = vals.reduce((sum, s) => sum + s.entrances, 0);
@@ -163,5 +190,14 @@ export function useLiveOccupancy(
     (id) => doorwayStates[id]?.connected
   );
 
-  return { totalCount, totalEntrances, totalExits, allConnected, anyConnected, doorwayStates };
+  return {
+    totalCount,
+    totalEntrances,
+    totalExits,
+    allConnected,
+    anyConnected,
+    doorwayStates,
+    events,
+    resetCounts,
+  };
 }

@@ -15,8 +15,9 @@ import {
 import { useHistoricalData } from "@/hooks/useHistoricalData";
 import { useClassStatus, ClassStatus } from "@/hooks/useClassStatus";
 import { useLiveOccupancy } from "@/hooks/useLiveOccupancy";
-import { fromNZLocal, addMinutesNZ } from "@/lib/nz-time";
+import { fromNZLocal, addMinutesNZ, getNowNZ } from "@/lib/nz-time";
 import { generateClassExportCsv, triggerDownload } from "@/lib/csv-export";
+import { findCountAtOffset } from "@/lib/count-at-offset";
 
 interface ClassRowProps {
   spaceId: string;
@@ -30,6 +31,13 @@ interface ClassRowProps {
   className?: string;
   instructor?: string;
   doorwayIds?: string[];
+  countAtOffset?: number; // minutes after class start (default 10)
+  /** Pre-fetched data from parent (used for linked back-to-back groups) */
+  prefetchedData?: import("@/lib/density-api").MetricsBucket[];
+  prefetchedLoading?: boolean;
+  prefetchedError?: string | null;
+  /** Whether this row is part of a linked back-to-back group */
+  isLinked?: boolean;
   onTimeChange: (time: string) => void;
   onBufferOverrideChange: (before: number | null, after: number | null) => void;
   onRemove: () => void;
@@ -74,6 +82,11 @@ export default function ClassRow({
   className: classLabel,
   instructor,
   doorwayIds,
+  countAtOffset = 10,
+  prefetchedData,
+  prefetchedLoading,
+  prefetchedError,
+  isLinked = false,
   onTimeChange,
   onBufferOverrideChange,
   onRemove,
@@ -116,21 +129,41 @@ export default function ClassRow({
     };
   }, [date, time, effectiveBefore, effectiveAfter]);
 
-  const { data, loading, error, refetch } = useHistoricalData(
-    spaceId,
-    startUTC,
-    endUTC,
+  // When prefetchedData is provided (linked group), skip internal fetching
+  // and filter the shared dataset to this class's window
+  const hasPrefetched = prefetchedData !== undefined;
+  const internalResult = useHistoricalData(
+    hasPrefetched ? "" : spaceId, // empty spaceId skips fetch
+    hasPrefetched ? "" : startUTC,
+    hasPrefetched ? "" : endUTC,
     "1m"
   );
+
+  const data = useMemo(() => {
+    if (hasPrefetched) {
+      if (!startUTC || !endUTC) return prefetchedData ?? [];
+      const startMs = new Date(startUTC).getTime();
+      const endMs = new Date(endUTC).getTime();
+      return (prefetchedData ?? []).filter((b) => {
+        const ts = new Date(b.timestamp).getTime();
+        return ts >= startMs && ts < endMs;
+      });
+    }
+    return internalResult.data;
+  }, [hasPrefetched, prefetchedData, startUTC, endUTC, internalResult.data]);
+
+  const loading = hasPrefetched ? (prefetchedLoading ?? false) : internalResult.loading;
+  const error = hasPrefetched ? (prefetchedError ?? null) : internalResult.error;
+  const refetch = internalResult.refetch;
 
   // Refetch historical data when transitioning from live to completed
   const prevStatusRef = useRef<ClassStatus>(status);
   useEffect(() => {
-    if (prevStatusRef.current === "live" && status === "completed") {
+    if (prevStatusRef.current === "live" && status === "completed" && !hasPrefetched) {
       refetch();
     }
     prevStatusRef.current = status;
-  }, [status, refetch]);
+  }, [status, refetch, hasPrefetched]);
 
   const stats = useMemo(() => {
     let entrances = 0;
@@ -152,11 +185,48 @@ export default function ClassRow({
     [data]
   );
 
-  const classStartLabel = useMemo(() => {
+  // Class start UTC for offset calculations
+  const classStartUtc = useMemo(() => {
     if (!time || !date) return "";
-    const utc = fromNZLocal(`${date}T${time}`);
-    return utc ? formatChartTimestamp(utc) : "";
+    return fromNZLocal(`${date}T${time}`);
   }, [date, time]);
+
+  const classStartLabel = useMemo(() => {
+    return classStartUtc ? formatChartTimestamp(classStartUtc) : "";
+  }, [classStartUtc]);
+
+  // Count at offset — snapshot of occupancy at class_start + N minutes
+  const countAtOffsetValue = useMemo(() => {
+    if (!classStartUtc || data.length === 0) return null;
+    const { count } = findCountAtOffset(data, classStartUtc, countAtOffset);
+    return count;
+  }, [data, classStartUtc, countAtOffset]);
+
+  // Chart label for the offset mark
+  const countAtOffsetLabel = useMemo(() => {
+    if (!classStartUtc) return "";
+    const offsetMs = new Date(classStartUtc).getTime() + countAtOffset * 60 * 1000;
+    return formatChartTimestamp(new Date(offsetMs).toISOString());
+  }, [classStartUtc, countAtOffset]);
+
+  // For live classes: snapshot the count once when the offset moment passes
+  const liveCountAtOffsetRef = useRef<number | null>(null);
+  const offsetTimePassed = useMemo(() => {
+    if (!time || !date) return false;
+    const offsetLocal = addMinutesNZ(date, time, countAtOffset);
+    const now = getNowNZ();
+    return now >= offsetLocal;
+  }, [date, time, countAtOffset]);
+
+  useEffect(() => {
+    if (status === "live" && offsetTimePassed && liveCountAtOffsetRef.current === null) {
+      liveCountAtOffsetRef.current = totalCount;
+    }
+    // Reset when class changes
+    if (status !== "live") {
+      liveCountAtOffsetRef.current = null;
+    }
+  }, [status, offsetTimePassed, totalCount]);
 
   const hasTime = !!time;
 
@@ -175,21 +245,33 @@ export default function ClassRow({
   // Determine which stats to display based on status
   const isLive = status === "live";
   const isUpcoming = status === "upcoming";
+  const offsetLabel = `Count @+${countAtOffset}min`;
+  const liveOffsetDisplay = isLive
+    ? liveCountAtOffsetRef.current
+    : null;
+  const historicalOffsetDisplay = countAtOffsetValue;
+
   const displayStats = isLive
     ? [
         { label: "Entrances", value: totalEntrances, color: "text-green-600" },
         { label: "Exits", value: totalExits, color: "text-amber-600" },
         { label: "Net Occupancy", value: totalCount, color: "text-blue-600" },
+        { label: offsetLabel, value: liveOffsetDisplay, color: "text-purple-600" },
       ]
     : [
         { label: "Entrances", value: stats.entrances, color: "text-green-600" },
         { label: "Exits", value: stats.exits, color: "text-amber-600" },
         { label: "Net Occupancy", value: stats.net, color: "text-blue-600" },
+        { label: offsetLabel, value: historicalOffsetDisplay, color: "text-purple-600" },
       ];
 
   return (
     <div className="bg-white rounded-xl shadow-md p-4">
       <div className="flex items-center gap-4 mb-3">
+        <span className="text-sm text-gray-500 font-medium">
+          {date.split("-").reverse().join("/")}
+        </span>
+
         <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
           Class time:
           <input
@@ -246,7 +328,9 @@ export default function ClassRow({
                   spaceName,
                   classLabel ?? "",
                   instructor ?? "",
-                  time
+                  time,
+                  countAtOffset,
+                  classStartUtc
                 );
                 const safeName = (classLabel ?? "class").replace(/[^a-zA-Z0-9]/g, "_");
                 triggerDownload(csv, `${safeName}_${date}_${time}.csv`);
@@ -315,7 +399,7 @@ export default function ClassRow({
         </div>
       )}
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-4 gap-4">
         {displayStats.map((card) => (
           <div
             key={card.label}
@@ -382,6 +466,15 @@ export default function ClassRow({
                     strokeDasharray="4 4"
                     strokeWidth={1.5}
                     label={{ value: "Class start", position: "top", fontSize: 10, fill: "#6366f1" }}
+                  />
+                )}
+                {countAtOffsetLabel && (
+                  <ReferenceLine
+                    x={countAtOffsetLabel}
+                    stroke="#a855f7"
+                    strokeDasharray="4 4"
+                    strokeWidth={1.5}
+                    label={{ value: `+${countAtOffset}min`, position: "top", fontSize: 10, fill: "#a855f7" }}
                   />
                 )}
                 <Line

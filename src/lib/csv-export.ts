@@ -1,4 +1,5 @@
 import type { MetricsBucket } from "./density-api";
+import { findCountAtOffset } from "./count-at-offset";
 
 const NZ_FORMATTER = new Intl.DateTimeFormat("en-NZ", {
   timeZone: "Pacific/Auckland",
@@ -25,6 +26,7 @@ export interface ClassWindow {
   scheduledTime: string; // "HH:MM"
   startUtc: string;
   endUtc: string;
+  countAtOffsetMinutes: number;
 }
 
 export interface CsvRow {
@@ -39,6 +41,8 @@ export interface CsvRow {
   class_name: string;
   instructor: string;
   scheduled_time: string;
+  count_at_offset: number | null;
+  count_at_offset_minutes: number | string;
 }
 
 const CSV_COLUMNS: (keyof CsvRow)[] = [
@@ -53,6 +57,8 @@ const CSV_COLUMNS: (keyof CsvRow)[] = [
   "class_name",
   "instructor",
   "scheduled_time",
+  "count_at_offset",
+  "count_at_offset_minutes",
 ];
 
 function findClassWindow(
@@ -68,13 +74,42 @@ function findClassWindow(
   return undefined;
 }
 
+/**
+ * Pre-compute the count-at-offset for each class window.
+ * Returns a Map keyed by "scheduledTime|startUtc" to the offset count.
+ */
+function computeOffsetCounts(
+  buckets: MetricsBucket[],
+  classWindows: ClassWindowExtended[]
+): Map<string, number | null> {
+  const result = new Map<string, number | null>();
+  for (const w of classWindows) {
+    const key = `${w.scheduledTime}|${w.startUtc}`;
+    if (w.classStartUtc) {
+      const { count } = findCountAtOffset(buckets, w.classStartUtc, w.countAtOffsetMinutes);
+      result.set(key, count);
+    } else {
+      result.set(key, null);
+    }
+  }
+  return result;
+}
+
+export interface ClassWindowExtended extends ClassWindow {
+  classStartUtc: string;
+}
+
 export function buildCsvRows(
   buckets: MetricsBucket[],
   spaceName: string,
-  classWindows: ClassWindow[]
+  classWindows: ClassWindowExtended[]
 ): CsvRow[] {
+  const offsetCounts = computeOffsetCounts(buckets, classWindows);
+
   return buckets.map((b) => {
     const matched = findClassWindow(b.timestamp, classWindows);
+    const key = matched ? `${matched.scheduledTime}|${matched.startUtc}` : null;
+    const offsetCount = key ? (offsetCounts.get(key) ?? null) : null;
     return {
       timestamp: b.timestamp,
       timestamp_nz: toNZTimestamp(b.timestamp),
@@ -87,6 +122,8 @@ export function buildCsvRows(
       class_name: matched?.className ?? "",
       instructor: matched?.instructor ?? "",
       scheduled_time: matched?.scheduledTime ?? "",
+      count_at_offset: matched ? offsetCount : null,
+      count_at_offset_minutes: matched ? matched.countAtOffsetMinutes : "",
     };
   });
 }
@@ -123,14 +160,18 @@ export function generateClassExportCsv(
   spaceName: string,
   className: string,
   instructor: string,
-  scheduledTime: string
+  scheduledTime: string,
+  countAtOffsetMinutes: number = 10,
+  classStartUtc?: string
 ): string {
-  const classWindow: ClassWindow = {
+  const classWindow: ClassWindowExtended = {
     className,
     instructor,
     scheduledTime,
     startUtc: data.length > 0 ? data[0].timestamp : "",
     endUtc: data.length > 0 ? data[data.length - 1].timestamp : "",
+    countAtOffsetMinutes,
+    classStartUtc: classStartUtc ?? "",
   };
   const rows = buildCsvRows(data, spaceName, [classWindow]);
   return rowsToCsvString(rows);

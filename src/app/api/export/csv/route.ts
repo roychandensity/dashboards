@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getIronSession } from "iron-session";
 import { SessionData, sessionOptions } from "@/lib/session";
 import { fetchHistoricalMetrics1m } from "@/lib/density-api";
-import { buildCsvRows, rowsToCsvString, ClassWindow, CsvRow } from "@/lib/csv-export";
+import { buildCsvRows, rowsToCsvString, ClassWindowExtended, CsvRow } from "@/lib/csv-export";
 import { fromNZLocal } from "@/lib/nz-time";
 
 interface SpaceInput {
@@ -31,14 +31,20 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  let body: { spaces: SpaceInput[]; startDate: string; endDate: string; classes: ClassInput[] };
+  let body: {
+    spaces: SpaceInput[];
+    startDate: string;
+    endDate: string;
+    classes: ClassInput[];
+    countAtOffset?: number;
+  };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { spaces, startDate, endDate, classes } = body;
+  const { spaces, startDate, endDate, classes, countAtOffset = 10 } = body;
   if (!spaces?.length || !startDate || !endDate) {
     return NextResponse.json(
       { error: "spaces, startDate, and endDate are required" },
@@ -51,17 +57,20 @@ export async function POST(request: NextRequest) {
 
     for (const space of spaces) {
       // Build class windows for this space
-      const classWindows: ClassWindow[] = (classes ?? [])
+      const classWindows: ClassWindowExtended[] = (classes ?? [])
         .filter((c) => c.spaceId === space.spaceId)
         .map((c) => {
           const startLocal = addMinutes(c.date, c.time, -c.bufferBefore);
           const endLocal = addMinutes(c.date, c.time, c.bufferAfter);
+          const classStartUtc = fromNZLocal(`${c.date}T${c.time}`);
           return {
             className: c.className,
             instructor: c.instructor,
             scheduledTime: c.time,
             startUtc: fromNZLocal(startLocal),
             endUtc: fromNZLocal(endLocal),
+            countAtOffsetMinutes: countAtOffset,
+            classStartUtc,
           };
         });
 
