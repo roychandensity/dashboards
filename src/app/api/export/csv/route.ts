@@ -53,9 +53,13 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const allRows = (
-      await Promise.all(
-        spaces.map(async (space) => {
+    const CONCURRENCY = 3;
+    const allRows: SummaryCsvRow[] = [];
+
+    for (let i = 0; i < spaces.length; i += CONCURRENCY) {
+      const batch = spaces.slice(i, i + CONCURRENCY);
+      const batchRows = await Promise.all(
+        batch.map(async (space) => {
           const classWindows: ClassWindowExtended[] = (classes ?? [])
             .filter((c) => c.spaceId === space.spaceId)
             .map((c) => {
@@ -84,8 +88,9 @@ export async function POST(request: NextRequest) {
 
           return buildSummaryRows(buckets, space.spaceName, classWindows);
         })
-      )
-    ).flat();
+      );
+      allRows.push(...batchRows.flat());
+    }
 
     // Sort by date, time, then studio
     allRows.sort((a, b) => {
