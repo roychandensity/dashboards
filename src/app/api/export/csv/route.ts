@@ -53,39 +53,39 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const allRows: SummaryCsvRow[] = [];
+    const allRows = (
+      await Promise.all(
+        spaces.map(async (space) => {
+          const classWindows: ClassWindowExtended[] = (classes ?? [])
+            .filter((c) => c.spaceId === space.spaceId)
+            .map((c) => {
+              const startLocal = addMinutes(c.date, c.time, -c.bufferBefore);
+              const endLocal = addMinutes(c.date, c.time, c.bufferAfter);
+              const classStartUtc = fromNZLocal(`${c.date}T${c.time}`);
+              return {
+                className: c.className,
+                instructor: c.instructor,
+                scheduledTime: c.time,
+                date: c.date,
+                startUtc: fromNZLocal(startLocal),
+                endUtc: fromNZLocal(endLocal),
+                countAtOffsetMinutes: countAtOffset,
+                classStartUtc,
+                bufferBefore: c.bufferBefore,
+                bufferAfter: c.bufferAfter,
+              };
+            });
 
-    for (const space of spaces) {
-      // Build class windows for this space
-      const classWindows: ClassWindowExtended[] = (classes ?? [])
-        .filter((c) => c.spaceId === space.spaceId)
-        .map((c) => {
-          const startLocal = addMinutes(c.date, c.time, -c.bufferBefore);
-          const endLocal = addMinutes(c.date, c.time, c.bufferAfter);
-          const classStartUtc = fromNZLocal(`${c.date}T${c.time}`);
-          return {
-            className: c.className,
-            instructor: c.instructor,
-            scheduledTime: c.time,
-            date: c.date,
-            startUtc: fromNZLocal(startLocal),
-            endUtc: fromNZLocal(endLocal),
-            countAtOffsetMinutes: countAtOffset,
-            classStartUtc,
-            bufferBefore: c.bufferBefore,
-            bufferAfter: c.bufferAfter,
-          };
-        });
+          const buckets = await fetchHistoricalMetrics1m(
+            space.spaceId,
+            startDate,
+            endDate
+          );
 
-      const buckets = await fetchHistoricalMetrics1m(
-        space.spaceId,
-        startDate,
-        endDate
-      );
-
-      const rows = buildSummaryRows(buckets, space.spaceName, classWindows);
-      allRows.push(...rows);
-    }
+          return buildSummaryRows(buckets, space.spaceName, classWindows);
+        })
+      )
+    ).flat();
 
     // Sort by date, time, then studio
     allRows.sort((a, b) => {
