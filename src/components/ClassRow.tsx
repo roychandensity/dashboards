@@ -328,7 +328,10 @@ export default function ClassRow({
                   spaceName,
                   classLabel ?? "",
                   instructor ?? "",
+                  date,
                   time,
+                  effectiveBefore,
+                  effectiveAfter,
                   countAtOffset,
                   classStartUtc
                 );

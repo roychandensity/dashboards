@@ -25,11 +25,33 @@ function parseDdMmYyyy(raw: string): string | null {
   return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 }
 
-/** "5:30 AM" → "05:30", handles 12 AM/PM edge cases */
+const MONTH_ABBR: Record<string, number> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+/** "9-Feb-26" (D-Mon-YY) → "2026-02-09" */
+function parseDdMonYy(raw: string): string | null {
+  const match = raw.trim().match(/^(\d{1,2})-([A-Za-z]{3})-(\d{2})$/);
+  if (!match) return null;
+  const d = parseInt(match[1], 10);
+  const m = MONTH_ABBR[match[2].toLowerCase()];
+  const yy = parseInt(match[3], 10);
+  if (!m || d < 1 || d > 31) return null;
+  const y = 2000 + yy;
+  return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
+/** Try all supported date formats */
+function parseDate(raw: string): string | null {
+  return parseDdMmYyyy(raw) ?? parseDdMonYy(raw);
+}
+
+/** "5:30 AM" or "5:30:00 AM" → "05:30", handles 12 AM/PM edge cases */
 function parseAmPmTime(raw: string): string | null {
   const match = raw
     .trim()
-    .match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+    .match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)$/i);
   if (!match) return null;
   let h = parseInt(match[1], 10);
   const m = parseInt(match[2], 10);
@@ -67,24 +89,33 @@ export function parseScheduleCsv(csvText: string): ParseResult {
     colMap[headerCells[i]] = i;
   }
 
-  const studioIdx = colMap["studio"] ?? colMap["studioname"] ?? -1;
-  const dateIdx = colMap["date"] ?? -1;
-  const timeIdx = colMap["time"] ?? -1;
+  // Les Mills CSV: clubstudio is primary, fallback to clubname+studioname or plain studio
+  const clubStudioIdx = colMap["clubstudio"] ?? -1;
+  const clubNameIdx = colMap["clubname"] ?? -1;
+  const studioNameIdx = colMap["studioname"] ?? -1;
+  const plainStudioIdx = colMap["studio"] ?? -1;
+  const studioIdx = clubStudioIdx !== -1 ? clubStudioIdx
+    : plainStudioIdx !== -1 ? plainStudioIdx
+    : studioNameIdx; // fallback to StudioName alone
+  const hasStudioFallback = clubNameIdx !== -1 && studioNameIdx !== -1;
+
+  const dateIdx = colMap["startdate"] ?? colMap["date"] ?? -1;
+  const timeIdx = colMap["starttime"] ?? colMap["time"] ?? -1;
   const classNameIdx = colMap["classname"] ?? colMap["class"] ?? -1;
-  const instructorIdx = colMap["instructor"] ?? -1;
+  const instructorIdx = colMap["maininstructorname"] ?? colMap["instructor"] ?? -1;
   const bufferBeforeIdx = colMap["bufferbefore"] ?? -1;
   const bufferAfterIdx = colMap["bufferafter"] ?? -1;
 
-  if (studioIdx === -1) {
-    errors.push("Missing required column: studio");
+  if (studioIdx === -1 && !hasStudioFallback) {
+    errors.push("Missing required column: studio (or clubstudio, or clubname+studioname)");
   }
   if (dateIdx === -1) {
-    errors.push("Missing required column: date");
+    errors.push("Missing required column: date (or startdate)");
   }
   if (timeIdx === -1) {
-    errors.push("Missing required column: time");
+    errors.push("Missing required column: time (or starttime)");
   }
-  if (studioIdx === -1 || dateIdx === -1 || timeIdx === -1) {
+  if ((studioIdx === -1 && !hasStudioFallback) || dateIdx === -1 || timeIdx === -1) {
     return { classes, errors };
   }
 
@@ -92,16 +123,22 @@ export function parseScheduleCsv(csvText: string): ParseResult {
     const cells = lines[i].split(",").map((c) => c.trim());
     const rowNum = i + 1;
 
-    const studioName = cells[studioIdx] || "";
+    // Resolve studio name: clubstudio > clubname+studioname > studioname > studio
+    let studioName = studioIdx !== -1 ? (cells[studioIdx] || "") : "";
+    if (!studioName && hasStudioFallback) {
+      const club = cells[clubNameIdx] || "";
+      const studio = cells[studioNameIdx] || "";
+      studioName = club + studio;
+    }
     if (!studioName) {
       errors.push(`Row ${rowNum}: missing studio name`);
       continue;
     }
 
     const rawDate = cells[dateIdx] || "";
-    const date = parseDdMmYyyy(rawDate);
+    const date = parseDate(rawDate);
     if (!date) {
-      errors.push(`Row ${rowNum}: invalid date "${rawDate}" (expected dd/mm/yyyy)`);
+      errors.push(`Row ${rowNum}: invalid date "${rawDate}" (expected dd/mm/yyyy or d-Mon-yy)`);
       continue;
     }
 

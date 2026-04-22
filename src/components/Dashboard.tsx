@@ -8,7 +8,8 @@ import ExportPanel from "@/components/ExportPanel";
 import { detectBackToBack } from "@/lib/back-to-back";
 import { DensitySpace } from "@/lib/density-api";
 import { parseScheduleCsv } from "@/lib/parse-schedule-csv";
-import { getTodayNZ } from "@/lib/nz-time";
+import { read, utils } from "xlsx";
+import { getTodayNZ, fromNZLocal } from "@/lib/nz-time";
 import type { ScheduleClass } from "@/lib/types";
 
 interface DashboardProps {
@@ -66,16 +67,46 @@ function saveToStorage(
   }
 }
 
+/** "2026-02-09" → "Sunday, 9 Feb 2026" */
+function formatDateLabel(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  return date.toLocaleDateString("en-NZ", {
+    weekday: "long",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+/** Add minutes to "HH:MM" time string, returning "HH:MM" */
+function addMinutesLocal(time: string, minutes: number): string {
+  const [h, m] = time.split(":").map(Number);
+  const total = h * 60 + m + minutes;
+  const hh = Math.floor(((total % 1440) + 1440) % 1440 / 60);
+  const mm = ((total % 60) + 60) % 60;
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
 let nextId = 1;
 
 export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
   const [schedule, setSchedule] = useState<ScheduleClass[] | null>(null);
   const [bufferBefore, setBufferBefore] = useState(5);
-  const [bufferAfter, setBufferAfter] = useState(5);
+  const [bufferAfter, setBufferAfter] = useState(10);
   const [countAtOffset, setCountAtOffset] = useState(10);
   const [uploadErrors, setUploadErrors] = useState<string[]>([]);
   const [showExportPanel, setShowExportPanel] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [selectedSpaces, setSelectedSpaces] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [addSpaceId, setAddSpaceId] = useState("");
+  const [addDate, setAddDate] = useState("");
+  const [addTime, setAddTime] = useState("");
+  const [addClassName, setAddClassName] = useState("");
+  const [addInstructor, setAddInstructor] = useState("");
 
   // Refs so handlers always read the latest values without stale closures
   const bufferBeforeRef = useRef(bufferBefore);
@@ -100,6 +131,9 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
       if (typeof stored.countAtOffset === "number") {
         setCountAtOffset(stored.countAtOffset);
       }
+      // Default filter to first studio
+      const firstSpaceId = stored.schedule[0]?.spaceId;
+      if (firstSpaceId) setSelectedSpaces(new Set([firstSpaceId]));
     }
   }, []);
 
@@ -112,55 +146,92 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
     return map;
   }, [spaces]);
 
+  const processScheduleText = useCallback(
+    (csvText: string) => {
+      const { classes, errors } = parseScheduleCsv(csvText);
+
+      // Build two lookup maps: exact (lowercase) and normalized (no spaces)
+      const spaceMap = new Map<string, DensitySpace>();
+      const spaceMapNorm = new Map<string, DensitySpace>();
+      const DIGITS_TO_WORDS: Record<string, string> = {
+        "1": "one", "2": "two", "3": "three", "4": "four", "5": "five",
+        "6": "six", "7": "seven", "8": "eight", "9": "nine", "10": "ten",
+      };
+      const normalize = (s: string) =>
+        s.toLowerCase()
+          .replace(/\d+/g, (d) => DIGITS_TO_WORDS[d] ?? d)
+          .replace(/\s+/g, "");
+      for (const s of spaces) {
+        spaceMap.set(s.name.toLowerCase(), s);
+        spaceMapNorm.set(normalize(s.name), s);
+      }
+
+      const newErrors = [...errors];
+      const newSchedule: ScheduleClass[] = [];
+
+      for (const cls of classes) {
+        const space = spaceMap.get(cls.studioName.toLowerCase())
+          ?? spaceMapNorm.get(normalize(cls.studioName));
+        if (!space) {
+          newErrors.push(
+            `Studio "${cls.studioName}" not found in available spaces`
+          );
+          continue;
+        }
+        newSchedule.push({
+          id: String(nextId++),
+          spaceId: space.id,
+          date: cls.date,
+          time: cls.time,
+          className: cls.className,
+          instructor: cls.instructor,
+          bufferBeforeOverride: cls.bufferBefore,
+          bufferAfterOverride: cls.bufferAfter,
+        });
+      }
+
+      const result = newSchedule.length > 0 ? newSchedule : null;
+      setSchedule(result);
+      setUploadErrors(newErrors);
+      saveToStorage(result, bufferBeforeRef.current, bufferAfterRef.current, countAtOffsetRef.current);
+
+      if (result) {
+        const firstSpaceId = result[0]?.spaceId;
+        if (firstSpaceId) setSelectedSpaces(new Set([firstSpaceId]));
+      }
+    },
+    [spaces]
+  );
+
   const handleFileUpload = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
 
-      const reader = new FileReader();
-      reader.onload = () => {
-        const text = reader.result as string;
-        const { classes, errors } = parseScheduleCsv(text);
+      const isXlsx = file.name.endsWith(".xlsx") || file.name.endsWith(".xls");
 
-        const spaceMap = new Map<string, DensitySpace>();
-        for (const s of spaces) {
-          spaceMap.set(s.name.toLowerCase(), s);
-        }
-
-        const newErrors = [...errors];
-        const newSchedule: ScheduleClass[] = [];
-
-        for (const cls of classes) {
-          const space = spaceMap.get(cls.studioName.toLowerCase());
-          if (!space) {
-            newErrors.push(
-              `Studio "${cls.studioName}" not found in available spaces`
-            );
-            continue;
-          }
-          newSchedule.push({
-            id: String(nextId++),
-            spaceId: space.id,
-            date: cls.date,
-            time: cls.time,
-            className: cls.className,
-            instructor: cls.instructor,
-            bufferBeforeOverride: cls.bufferBefore,
-            bufferAfterOverride: cls.bufferAfter,
-          });
-        }
-
-        const result = newSchedule.length > 0 ? newSchedule : null;
-        setSchedule(result);
-        setUploadErrors(newErrors);
-        saveToStorage(result, bufferBeforeRef.current, bufferAfterRef.current, countAtOffsetRef.current);
-      };
-      reader.readAsText(file);
+      if (isXlsx) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const data = new Uint8Array(reader.result as ArrayBuffer);
+          const workbook = read(data, { type: "array" });
+          const sheet = workbook.Sheets[workbook.SheetNames[0]];
+          const csvText = utils.sheet_to_csv(sheet);
+          processScheduleText(csvText);
+        };
+        reader.readAsArrayBuffer(file);
+      } else {
+        const reader = new FileReader();
+        reader.onload = () => {
+          processScheduleText(reader.result as string);
+        };
+        reader.readAsText(file);
+      }
 
       // Reset input so the same file can be re-uploaded
       e.target.value = "";
     },
-    [spaces]
+    [processScheduleText]
   );
 
   const handleUploadClick = useCallback(() => {
@@ -175,23 +246,16 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
 
   const handleDownloadTemplate = useCallback(() => {
     const today = getTodayNZ();
-    const [y, m, d] = today.split("-");
-    const ddmmyyyy = `${d}/${m}/${y}`;
+    const header = "ClubName,StudioName,clubstudio,ClassName,LongClassName,StartDate,StartTime,Time,CRMAttended,DeviceProviderCount,ManualCount,MainInstructorName,Class Count";
 
-    const header = "studio,date,time,class_name,instructor,buffer_before,buffer_after";
-    const rows = spaces.map(
-      (s) => `${s.name},${ddmmyyyy},,,,, `
-    );
-    const csv = [header, ...rows].join("\n");
-
-    const blob = new Blob([csv], { type: "text/csv" });
+    const blob = new Blob([header], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = `schedule-template-${today}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [spaces]);
+  }, []);
 
   const updateClassTime = useCallback((id: string, time: string) => {
     setSchedule((prev) => {
@@ -230,6 +294,29 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
       return next;
     });
   }, []);
+
+  const handleAddClass = useCallback(() => {
+    if (!addSpaceId || !addDate || !addClassName) return;
+    const newClass: ScheduleClass = {
+      id: String(nextId++),
+      spaceId: addSpaceId,
+      date: addDate,
+      time: addTime,
+      className: addClassName,
+      instructor: addInstructor,
+      bufferBeforeOverride: null,
+      bufferAfterOverride: null,
+    };
+    setSchedule((prev) => {
+      const next = prev ? [...prev, newClass] : [newClass];
+      saveToStorage(next, bufferBeforeRef.current, bufferAfterRef.current, countAtOffsetRef.current);
+      return next;
+    });
+    // Reset form but keep it open for adding more
+    setAddTime("");
+    setAddClassName("");
+    setAddInstructor("");
+  }, [addSpaceId, addDate, addTime, addClassName, addInstructor]);
 
   const handleBufferBeforeChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -277,6 +364,83 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
     []
   );
 
+  const handleExportAll = useCallback(async () => {
+    if (!schedule || schedule.length === 0) return;
+
+    // Compute date range from entire schedule (with buffers)
+    let earliest: Date | null = null;
+    let latest: Date | null = null;
+    for (const cls of schedule) {
+      if (!cls.time) continue;
+      const before = cls.bufferBeforeOverride ?? bufferBeforeRef.current;
+      const after = cls.bufferAfterOverride ?? bufferAfterRef.current;
+      const startUtc = fromNZLocal(`${cls.date}T${addMinutesLocal(cls.time, -before)}`);
+      const endUtc = fromNZLocal(`${cls.date}T${addMinutesLocal(cls.time, after)}`);
+      if (!startUtc || !endUtc) continue;
+      const s = new Date(startUtc);
+      const e = new Date(endUtc);
+      if (!earliest || s < earliest) earliest = s;
+      if (!latest || e > latest) latest = e;
+    }
+
+    if (!earliest || !latest) return;
+
+    const spaceById = new Map(spaces.map((s) => [s.id, s]));
+    const spaceIds = [...new Set(schedule.map((c) => c.spaceId))];
+    const spacesPayload = spaceIds
+      .map((id) => {
+        const s = spaceById.get(id);
+        return s ? { spaceId: id, spaceName: s.name } : null;
+      })
+      .filter(Boolean);
+
+    const classesPayload = schedule
+      .filter((c) => c.time)
+      .map((c) => ({
+        spaceId: c.spaceId,
+        className: c.className,
+        instructor: c.instructor,
+        date: c.date,
+        time: c.time,
+        bufferBefore: c.bufferBeforeOverride ?? bufferBeforeRef.current,
+        bufferAfter: c.bufferAfterOverride ?? bufferAfterRef.current,
+      }));
+
+    setExportLoading(true);
+    setExportError(null);
+
+    try {
+      const res = await fetch("/api/export/csv", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          spaces: spacesPayload,
+          startDate: earliest.toISOString(),
+          endDate: latest.toISOString(),
+          classes: classesPayload,
+          countAtOffset: countAtOffsetRef.current,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(errData?.error ?? `Export failed (${res.status})`);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "density-export.csv";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : "Export failed");
+    } finally {
+      setExportLoading(false);
+    }
+  }, [schedule, spaces]);
+
   // Group schedule by spaceId, preserving order
   const groupedSchedule = schedule
     ? (() => {
@@ -305,7 +469,7 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
       <input
         ref={fileInputRef}
         type="file"
-        accept=".csv"
+        accept=".csv,.xlsx,.xls"
         onChange={handleFileUpload}
         className="hidden"
       />
@@ -354,6 +518,13 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
               Upload New
             </button>
             <button
+              onClick={handleExportAll}
+              disabled={exportLoading}
+              className="text-sm font-medium px-4 py-2 rounded-lg border bg-green-600 text-white border-green-600 hover:bg-green-700 disabled:bg-gray-300 disabled:border-gray-300 disabled:cursor-not-allowed"
+            >
+              {exportLoading ? "Exporting..." : "Export All CSV"}
+            </button>
+            <button
               onClick={() => setShowExportPanel((v) => !v)}
               className={`text-sm font-medium px-4 py-2 rounded-lg border ${
                 showExportPanel
@@ -361,13 +532,27 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
                   : "text-gray-600 hover:text-gray-800 border-gray-300"
               }`}
             >
-              Export All CSV
+              Custom Range
             </button>
             <button
               onClick={handleClear}
               className="text-sm text-gray-600 hover:text-gray-800 border border-gray-300 px-4 py-2 rounded-lg"
             >
               Clear Schedule
+            </button>
+            <button
+              onClick={() => {
+                setShowAddForm((v) => !v);
+                if (!addDate) setAddDate(getTodayNZ());
+                if (!addSpaceId && spaces.length > 0) setAddSpaceId(spaces[0].id);
+              }}
+              className={`text-sm font-medium px-4 py-2 rounded-lg border ${
+                showAddForm
+                  ? "bg-indigo-50 text-indigo-700 border-indigo-300"
+                  : "text-gray-600 hover:text-gray-800 border-gray-300"
+              }`}
+            >
+              {showAddForm ? "Hide Form" : "Add Class"}
             </button>
 
             <div className="flex items-center gap-2 ml-auto">
@@ -423,6 +608,82 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
             </div>
           )}
 
+          {exportLoading && (
+            <p className="mb-4 text-sm text-gray-500 animate-pulse">
+              Fetching data for all classes. This may take a moment...
+            </p>
+          )}
+
+          {exportError && (
+            <div className="mb-4 bg-red-50 border border-red-200 rounded-lg p-3">
+              <p className="text-sm text-red-600">{exportError}</p>
+            </div>
+          )}
+
+          {showAddForm && (
+            <div className="mb-4 bg-gray-50 border border-gray-200 rounded-lg p-4">
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="flex flex-col text-sm text-gray-700">
+                  Space
+                  <select
+                    value={addSpaceId}
+                    onChange={(e) => setAddSpaceId(e.target.value)}
+                    className="mt-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm"
+                  >
+                    {spaces.map((s) => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col text-sm text-gray-700">
+                  Date
+                  <input
+                    type="date"
+                    value={addDate}
+                    onChange={(e) => setAddDate(e.target.value)}
+                    className="mt-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="flex flex-col text-sm text-gray-700">
+                  Time
+                  <input
+                    type="time"
+                    value={addTime}
+                    onChange={(e) => setAddTime(e.target.value)}
+                    className="mt-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="flex flex-col text-sm text-gray-700">
+                  Class Name
+                  <input
+                    type="text"
+                    value={addClassName}
+                    onChange={(e) => setAddClassName(e.target.value)}
+                    placeholder="e.g. Spin"
+                    className="mt-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm w-36"
+                  />
+                </label>
+                <label className="flex flex-col text-sm text-gray-700">
+                  Instructor
+                  <input
+                    type="text"
+                    value={addInstructor}
+                    onChange={(e) => setAddInstructor(e.target.value)}
+                    placeholder="Optional"
+                    className="mt-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm w-36"
+                  />
+                </label>
+                <button
+                  onClick={handleAddClass}
+                  disabled={!addSpaceId || !addDate || !addClassName}
+                  className="bg-indigo-600 text-white text-sm font-medium px-4 py-1.5 rounded-lg hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          )}
+
           {showExportPanel && schedule && (
             <ExportPanel
               spaces={spaces}
@@ -433,7 +694,47 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
             />
           )}
 
-          {groupedSchedule?.map(({ space, classes: spaceClasses }) => {
+          {groupedSchedule && groupedSchedule.length > 1 && (
+            <div className="flex flex-wrap gap-2 mb-4">
+              <button
+                onClick={() => setSelectedSpaces(new Set())}
+                className={`text-xs font-medium px-3 py-1.5 rounded-full border transition-colors ${
+                  selectedSpaces.size === 0
+                    ? "bg-indigo-600 text-white border-indigo-600"
+                    : "text-gray-600 border-gray-300 hover:border-gray-400"
+                }`}
+              >
+                All
+              </button>
+              {groupedSchedule.map(({ space }) => {
+                const active = selectedSpaces.has(space.id);
+                return (
+                  <button
+                    key={space.id}
+                    onClick={() =>
+                      setSelectedSpaces((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(space.id)) next.delete(space.id);
+                        else next.add(space.id);
+                        return next;
+                      })
+                    }
+                    className={`text-xs font-medium px-3 py-1.5 rounded-full border transition-colors ${
+                      active
+                        ? "bg-indigo-600 text-white border-indigo-600"
+                        : "text-gray-600 border-gray-300 hover:border-gray-400"
+                    }`}
+                  >
+                    {space.name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {groupedSchedule
+            ?.filter(({ space }) => selectedSpaces.size === 0 || selectedSpaces.has(space.id))
+            .map(({ space, classes: spaceClasses }) => {
             const groups = detectBackToBack(spaceClasses, bufferBefore, bufferAfter);
             return (
               <div key={space.id} className="mb-8">
@@ -444,23 +745,38 @@ export default function Dashboard({ spaces, doorwayHealth }: DashboardProps) {
                   {space.name}
                 </Link>
                 <div className="space-y-4">
-                  {groups.map((group) => (
-                    <ClassGroupWrapper
-                      key={group.classes.map((c) => c.id).join("-")}
-                      group={group}
-                      spaceId={space.id}
-                      spaceName={space.name}
-                      doorwayIds={doorwayIdsBySpace.get(space.id) ?? []}
-                      globalBufferBefore={bufferBefore}
-                      globalBufferAfter={bufferAfter}
-                      countAtOffset={countAtOffset}
-                      onTimeChange={(id, t) => updateClassTime(id, t)}
-                      onBufferOverrideChange={(id, before, after) =>
-                        updateClassBuffers(id, before, after)
-                      }
-                      onRemove={(id) => removeClass(id)}
-                    />
-                  ))}
+                  {groups.map((group, gi) => {
+                    const groupDate = group.classes[0]?.date;
+                    const prevDate = gi > 0 ? groups[gi - 1].classes[0]?.date : null;
+                    const showDateDivider = gi === 0 || groupDate !== prevDate;
+                    return (
+                      <div key={group.classes.map((c) => c.id).join("-")}>
+                        {showDateDivider && (
+                          <div className="flex items-center gap-3 pt-2 pb-1">
+                            <div className="h-px flex-1 bg-gray-200" />
+                            <span className="text-xs font-medium text-gray-500 whitespace-nowrap">
+                              {formatDateLabel(groupDate)}
+                            </span>
+                            <div className="h-px flex-1 bg-gray-200" />
+                          </div>
+                        )}
+                        <ClassGroupWrapper
+                          group={group}
+                          spaceId={space.id}
+                          spaceName={space.name}
+                          doorwayIds={doorwayIdsBySpace.get(space.id) ?? []}
+                          globalBufferBefore={bufferBefore}
+                          globalBufferAfter={bufferAfter}
+                          countAtOffset={countAtOffset}
+                          onTimeChange={(id, t) => updateClassTime(id, t)}
+                          onBufferOverrideChange={(id, before, after) =>
+                            updateClassBuffers(id, before, after)
+                          }
+                          onRemove={(id) => removeClass(id)}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             );

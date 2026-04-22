@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { MetricsBucket } from "@/lib/density-api";
+import { queuedFetch } from "@/lib/fetch-queue";
 
 interface UseHistoricalDataResult {
   data: MetricsBucket[];
@@ -35,7 +36,7 @@ export function useHistoricalData(
         resolution,
       });
 
-      const res = await fetch(
+      const res = await queuedFetch(
         `/api/spaces/${spaceId}/historical?${params}`
       );
 

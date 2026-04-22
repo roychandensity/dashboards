@@ -1,129 +1,92 @@
 import type { MetricsBucket } from "./density-api";
 import { findCountAtOffset } from "./count-at-offset";
 
-const NZ_FORMATTER = new Intl.DateTimeFormat("en-NZ", {
-  timeZone: "Pacific/Auckland",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hour12: false,
-});
-
-function toNZTimestamp(isoUtc: string): string {
-  const d = new Date(isoUtc);
-  if (isNaN(d.getTime())) return "";
-  const parts = NZ_FORMATTER.formatToParts(d);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
-  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
-}
-
-export interface ClassWindow {
+export interface ClassWindowExtended {
   className: string;
   instructor: string;
   scheduledTime: string; // "HH:MM"
+  date: string; // "YYYY-MM-DD"
   startUtc: string;
   endUtc: string;
   countAtOffsetMinutes: number;
+  classStartUtc: string;
+  bufferBefore: number;
+  bufferAfter: number;
 }
 
-export interface CsvRow {
-  timestamp: string;
-  timestamp_nz: string;
-  space_name: string;
-  entrances: number;
-  exits: number;
-  occupancy_avg: number | null;
-  occupancy_max: number | null;
-  occupancy_min: number | null;
+export interface SummaryCsvRow {
+  date: string;
+  time: string;
+  studio: string;
   class_name: string;
   instructor: string;
-  scheduled_time: string;
+  buffer_before: number;
+  buffer_after: number;
+  entrances: number;
+  exits: number;
+  net_occupancy: number;
   count_at_offset: number | null;
-  count_at_offset_minutes: number | string;
+  count_at_offset_minutes: number;
 }
 
-const CSV_COLUMNS: (keyof CsvRow)[] = [
-  "timestamp",
-  "timestamp_nz",
-  "space_name",
-  "entrances",
-  "exits",
-  "occupancy_avg",
-  "occupancy_max",
-  "occupancy_min",
+const SUMMARY_COLUMNS: (keyof SummaryCsvRow)[] = [
+  "date",
+  "time",
+  "studio",
   "class_name",
   "instructor",
-  "scheduled_time",
+  "buffer_before",
+  "buffer_after",
+  "entrances",
+  "exits",
+  "net_occupancy",
   "count_at_offset",
   "count_at_offset_minutes",
 ];
 
-function findClassWindow(
-  timestampUtc: string,
-  classWindows: ClassWindow[]
-): ClassWindow | undefined {
-  const ts = new Date(timestampUtc).getTime();
-  for (const w of classWindows) {
-    const start = new Date(w.startUtc).getTime();
-    const end = new Date(w.endUtc).getTime();
-    if (ts >= start && ts < end) return w;
-  }
-  return undefined;
-}
-
 /**
- * Pre-compute the count-at-offset for each class window.
- * Returns a Map keyed by "scheduledTime|startUtc" to the offset count.
+ * Build one summary row per class window by aggregating all minute-level
+ * buckets that fall within that window.
  */
-function computeOffsetCounts(
-  buckets: MetricsBucket[],
-  classWindows: ClassWindowExtended[]
-): Map<string, number | null> {
-  const result = new Map<string, number | null>();
-  for (const w of classWindows) {
-    const key = `${w.scheduledTime}|${w.startUtc}`;
-    if (w.classStartUtc) {
-      const { count } = findCountAtOffset(buckets, w.classStartUtc, w.countAtOffsetMinutes);
-      result.set(key, count);
-    } else {
-      result.set(key, null);
-    }
-  }
-  return result;
-}
-
-export interface ClassWindowExtended extends ClassWindow {
-  classStartUtc: string;
-}
-
-export function buildCsvRows(
+export function buildSummaryRows(
   buckets: MetricsBucket[],
   spaceName: string,
   classWindows: ClassWindowExtended[]
-): CsvRow[] {
-  const offsetCounts = computeOffsetCounts(buckets, classWindows);
+): SummaryCsvRow[] {
+  return classWindows.map((w) => {
+    const startMs = new Date(w.startUtc).getTime();
+    const endMs = new Date(w.endUtc).getTime();
+    const windowBuckets = buckets.filter((b) => {
+      const ts = new Date(b.timestamp).getTime();
+      return ts >= startMs && ts < endMs;
+    });
 
-  return buckets.map((b) => {
-    const matched = findClassWindow(b.timestamp, classWindows);
-    const key = matched ? `${matched.scheduledTime}|${matched.startUtc}` : null;
-    const offsetCount = key ? (offsetCounts.get(key) ?? null) : null;
+    let entrances = 0;
+    let exits = 0;
+    for (const b of windowBuckets) {
+      entrances += b.entrances;
+      exits += b.exits;
+    }
+
+    let countAtOffsetValue: number | null = null;
+    if (w.classStartUtc) {
+      const { count } = findCountAtOffset(windowBuckets, w.classStartUtc, w.countAtOffsetMinutes);
+      countAtOffsetValue = count;
+    }
+
     return {
-      timestamp: b.timestamp,
-      timestamp_nz: toNZTimestamp(b.timestamp),
-      space_name: spaceName,
-      entrances: b.entrances,
-      exits: b.exits,
-      occupancy_avg: b.occupancy_avg,
-      occupancy_max: b.occupancy_max,
-      occupancy_min: b.occupancy_min,
-      class_name: matched?.className ?? "",
-      instructor: matched?.instructor ?? "",
-      scheduled_time: matched?.scheduledTime ?? "",
-      count_at_offset: matched ? offsetCount : null,
-      count_at_offset_minutes: matched ? matched.countAtOffsetMinutes : "",
+      date: w.date,
+      time: w.scheduledTime,
+      studio: spaceName,
+      class_name: w.className,
+      instructor: w.instructor,
+      buffer_before: w.bufferBefore,
+      buffer_after: w.bufferAfter,
+      entrances,
+      exits,
+      net_occupancy: entrances - exits,
+      count_at_offset: countAtOffsetValue,
+      count_at_offset_minutes: w.countAtOffsetMinutes,
     };
   });
 }
@@ -137,10 +100,10 @@ function escapeCsvField(value: string | number | null): string {
   return str;
 }
 
-export function rowsToCsvString(rows: CsvRow[]): string {
-  const header = CSV_COLUMNS.join(",");
+export function summaryRowsToCsvString(rows: SummaryCsvRow[]): string {
+  const header = SUMMARY_COLUMNS.join(",");
   const lines = rows.map((row) =>
-    CSV_COLUMNS.map((col) => escapeCsvField(row[col])).join(",")
+    SUMMARY_COLUMNS.map((col) => escapeCsvField(row[col])).join(",")
   );
   return [header, ...lines].join("\n");
 }
@@ -160,7 +123,10 @@ export function generateClassExportCsv(
   spaceName: string,
   className: string,
   instructor: string,
+  date: string,
   scheduledTime: string,
+  bufferBefore: number,
+  bufferAfter: number,
   countAtOffsetMinutes: number = 10,
   classStartUtc?: string
 ): string {
@@ -168,11 +134,14 @@ export function generateClassExportCsv(
     className,
     instructor,
     scheduledTime,
+    date,
     startUtc: data.length > 0 ? data[0].timestamp : "",
     endUtc: data.length > 0 ? data[data.length - 1].timestamp : "",
     countAtOffsetMinutes,
     classStartUtc: classStartUtc ?? "",
+    bufferBefore,
+    bufferAfter,
   };
-  const rows = buildCsvRows(data, spaceName, [classWindow]);
-  return rowsToCsvString(rows);
+  const rows = buildSummaryRows(data, spaceName, [classWindow]);
+  return summaryRowsToCsvString(rows);
 }

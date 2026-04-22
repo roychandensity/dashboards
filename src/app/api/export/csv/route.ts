@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getIronSession } from "iron-session";
 import { SessionData, sessionOptions } from "@/lib/session";
 import { fetchHistoricalMetrics1m } from "@/lib/density-api";
-import { buildCsvRows, rowsToCsvString, ClassWindowExtended, CsvRow } from "@/lib/csv-export";
+import { buildSummaryRows, summaryRowsToCsvString, ClassWindowExtended, SummaryCsvRow } from "@/lib/csv-export";
 import { fromNZLocal } from "@/lib/nz-time";
 
 interface SpaceInput {
@@ -53,7 +53,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const allRows: CsvRow[] = [];
+    const allRows: SummaryCsvRow[] = [];
 
     for (const space of spaces) {
       // Build class windows for this space
@@ -67,10 +67,13 @@ export async function POST(request: NextRequest) {
             className: c.className,
             instructor: c.instructor,
             scheduledTime: c.time,
+            date: c.date,
             startUtc: fromNZLocal(startLocal),
             endUtc: fromNZLocal(endLocal),
             countAtOffsetMinutes: countAtOffset,
             classStartUtc,
+            bufferBefore: c.bufferBefore,
+            bufferAfter: c.bufferAfter,
           };
         });
 
@@ -80,18 +83,20 @@ export async function POST(request: NextRequest) {
         endDate
       );
 
-      const rows = buildCsvRows(buckets, space.spaceName, classWindows);
+      const rows = buildSummaryRows(buckets, space.spaceName, classWindows);
       allRows.push(...rows);
     }
 
-    // Sort by timestamp then space_name
+    // Sort by date, time, then studio
     allRows.sort((a, b) => {
-      const tc = a.timestamp.localeCompare(b.timestamp);
+      const dc = a.date.localeCompare(b.date);
+      if (dc !== 0) return dc;
+      const tc = a.time.localeCompare(b.time);
       if (tc !== 0) return tc;
-      return a.space_name.localeCompare(b.space_name);
+      return a.studio.localeCompare(b.studio);
     });
 
-    const csv = rowsToCsvString(allRows);
+    const csv = summaryRowsToCsvString(allRows);
 
     return new Response(csv, {
       status: 200,
